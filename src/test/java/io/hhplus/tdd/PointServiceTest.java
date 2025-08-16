@@ -2,14 +2,13 @@ package io.hhplus.tdd;
 
 import io.hhplus.tdd.database.PointHistoryTable;
 import io.hhplus.tdd.database.UserPointTable;
-import io.hhplus.tdd.point.PointHistory;
-import io.hhplus.tdd.point.PointService;
-import io.hhplus.tdd.point.TransactionType;
-import io.hhplus.tdd.point.UserPoint;
+import io.hhplus.tdd.point.*;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.*;
 
 import static org.assertj.core.api.Assertions.*; // assertThat, assertThatThrownBy
 
@@ -112,10 +111,8 @@ class PointServiceTest {
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
-    // --- 시나리오 ---
-
     @Test
-    @DisplayName("충전→사용→사용: 최종 잔액과 히스토리")
+    @DisplayName("충전-사용-사용: 최종 잔액, 이력 확인")
     void scenario_charge_then_use_then_use() {
         PointService svc = new PointService(new UserPointTable(), new PointHistoryTable());
         long userId = 30L;
@@ -132,4 +129,37 @@ class PointServiceTest {
         assertThat(h).extracting(PointHistory::amount)
                 .containsExactly(1000L, 400L, 100L);
     }
+
+    @Test
+    @DisplayName("락 O: 같은 유저 두 번 동시 사용 → 한쪽은 예외, 최종 잔액 0")
+    void withLock_doubleSpend_prevented_invokeAll() throws Exception {
+        var upt = new UserPointTable();
+        var pht = new PointHistoryTable();
+        var svc = new PointService(upt, pht); // userId별 synchronized 적용됨
+
+        long userId = 300L;
+        svc.charge(userId, 1000L);
+
+        List<Throwable> errors = new CopyOnWriteArrayList<>();
+
+        ExecutorService es = Executors.newFixedThreadPool(2);
+        try {
+            List<Callable<Void>> jobs = List.of(
+                    () -> { try { svc.use(userId, 1000L); } catch (Throwable t) { errors.add(t); } return null; },
+                    () -> { try { svc.use(userId, 1000L); } catch (Throwable t) { errors.add(t); } return null; }
+            );
+            es.invokeAll(jobs);
+        } finally {
+            es.shutdown();
+        }
+
+        // 두 요청 중 한 건은 반드시 실패(잔액 부족)
+        assertThat(errors).hasSize(1);
+        assertThat(errors.get(0)).isInstanceOf(IllegalStateException.class);
+
+        // 최종 잔액은 정확히 0
+        assertThat(svc.point(userId).point()).isEqualTo(0L);
+    }
+
+
 }
